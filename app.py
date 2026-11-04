@@ -131,6 +131,8 @@ if page == "1. Accounts":
     st.header("1. Accounts")
     st.write("Enter the login details for the old and the new account. You can save them as a profile for next time.")
 
+    if "profile_msg" in st.session_state:
+        st.success(st.session_state.pop("profile_msg"))
     with st.expander("Saved profiles", expanded=bool(profiles.list_profiles(platform))):
         c1, c2 = st.columns(2)
         with c1:
@@ -141,9 +143,12 @@ if page == "1. Accounts":
                 loaded = profiles.load(pick, platform, cls.fields)
                 for side in SIDES:
                     values[side].update(loaded.get(side, {}))
-                for k in [k for k in st.session_state if str(k).startswith(f"{platform}_")]:
-                    del st.session_state[k]            # let the form boxes show the loaded values
+                    for fkey, fval in loaded.get(side, {}).items():
+                        st.session_state[f"{platform}_{side}_{fkey}"] = fval   # put the values into the form boxes
                 st.session_state.pop(f"tested_{platform}", None)
+                for side in SIDES:
+                    st.session_state.pop(f"testmsg_{platform}_{side}", None)
+                st.session_state["profile_msg"] = f"Loaded profile '{pick}'. Click Test connection for each account."
                 st.rerun()
             if b2.button("Delete", disabled=pick == "-"):
                 profiles.delete(pick, platform, cls.fields)
@@ -164,14 +169,17 @@ if page == "1. Accounts":
 
             def render(f, side=side):
                 k = f"{platform}_{side}_{f.key}"
-                cur = values[side].get(f.key, "")
+                if k not in st.session_state:              # first time: start from saved / .env / default value
+                    st.session_state[k] = values[side].get(f.key, "") or ""
                 label_txt = f.label + (" *" if f.required else "")
                 if f.options:
                     opts = list(f.options)
-                    v = st.selectbox(label_txt, opts, index=opts.index(cur) if cur in opts else 0, key=k,
-                                     help=f.help or None, format_func=lambda o: o or "Password (default)")
+                    if st.session_state[k] not in opts:
+                        st.session_state[k] = opts[0]
+                    v = st.selectbox(label_txt, opts, key=k, help=f.help or None,
+                                     format_func=lambda o: o or "Password (default)")
                 else:
-                    v = st.text_input(label_txt, value=cur, key=k, help=f.help or None,
+                    v = st.text_input(label_txt, key=k, help=f.help or None,
                                       type="password" if f.secret else "default")
                 values[side][f.key] = v
 

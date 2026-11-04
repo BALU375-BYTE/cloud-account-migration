@@ -51,7 +51,10 @@ def file_url(path: Path) -> str:
 
 
 def first_line(err: Exception) -> str:
-    return str(err).strip().splitlines()[0][:220] if str(err).strip() else type(err).__name__
+    """Short error text. Snowflake puts the real reason on the line AFTER 'SQL compilation error:',
+    so the first few lines are joined instead of keeping only the first."""
+    lines = [l.strip() for l in str(err).strip().splitlines() if l.strip()]
+    return " ".join(lines[:3])[:300] if lines else type(err).__name__
 
 
 class SnowflakeConnector(SnowflakeExtrasMixin, Connector):
@@ -276,6 +279,19 @@ class SnowflakeConnector(SnowflakeExtrasMixin, Connector):
         R += self._backup_extras(base, census, "\n".join(all_ddl))
         R += self._backup_apps(base, census)
 
+        # 4c. streams: saved separately and created AFTER the data is loaded (see restore)
+        streams = []
+        for db, d in self.inv.items():
+            for r in d.get("streams", []):
+                sfq = fq(db, r["schema_name"], r["name"])
+                try:
+                    streams.append({"fq": sfq, "source": r.get("table_name") or "",
+                                    "source_type": r.get("source_type") or "",
+                                    "ddl": self.scalar(f"SELECT GET_DDL('STREAM', {lit(sfq)}, TRUE)")})
+                except Exception as e:
+                    R.append(Result("stream", sfq, FAILED, f"could not read its definition: {first_line(e)}"))
+        (base / "streams.json").write_text(json.dumps(streams, indent=2))
+
         self.log("Saving stages and their files ...")
         # 5. stages (+ files inside internal stages)
         stages = []
@@ -456,7 +472,7 @@ class SnowflakeConnector(SnowflakeExtrasMixin, Connector):
         with self.conn.cursor() as cur:
             cur.execute(f"SELECT COUNT(*), HASH_AGG(*) FROM {name}")
             n, h = cur.fetchone()
-        return int(n), str(h)
+        return int(n or 0), str(h)
 
     def _semi_columns(self, name: str, columns: list) -> dict:
         """VARIANT/OBJECT/ARRAY columns -> how many values in them are plain text in the OLD table.
@@ -465,10 +481,13 @@ class SnowflakeConnector(SnowflakeExtrasMixin, Connector):
         if not semi:
             return {}
         sel = ", ".join(f"COUNT_IF(IS_VARCHAR({ident(c)}))" for c in semi)
-        with self.conn.cursor() as cur:
-            cur.execute(f"SELECT {sel} FROM {name}")
-            row = cur.fetchone()
-        return {c: int(n) for c, n in zip(semi, row)}
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute(f"SELECT {sel} FROM {name}")
+                row = cur.fetchone() or [0] * len(semi)
+        except Exception:
+            return {c: 1 for c in semi}       # unknown -> don't convert text automatically, just flag it
+        return {c: int(n or 0) for c, n in zip(semi, row)}   # empty tables return NULL instead of 0
 
     def _columns(self, name: str) -> list:
         try:
@@ -511,9 +530,13 @@ class SnowflakeConnector(SnowflakeExtrasMixin, Connector):
         R: list[Result] = []
         pending: list[list] = []          # [kind, name, statement, error]
 
+        skip_streams = (base / "streams.json").exists()
+
         def run(sql: str, kind: str, name: str):
             for stmt, _ in split_statements(StringIO(self.apply_rewrites(sql)), remove_comments=True):
                 stmt = stmt.strip()
+                if skip_streams and re.match(r"(?is)^create\s+(or\s+replace\s+)?stream\b", stmt):
+                    continue                    # streams are created after the data load (step 7b)
                 if stmt and stmt != ";":
                     try:
                         self.q(stmt)
@@ -622,22 +645,9 @@ class SnowflakeConnector(SnowflakeExtrasMixin, Connector):
             except Exception as e:
                 R.append(Result("table", t["fq"], FAILED, first_line(e)))
 
-        # 7b. streams were created before the data was loaded, so they now "see" every restored row
-        #     as a new insert. Recreate them so they start empty, like a fresh pipeline.
-        detail_file = base / "inventory_detail.json"
-        if detail_file.exists():
-            n_reset = 0
-            for db, d in json.loads(detail_file.read_text()).items():
-                for st_row in d.get("streams", []):
-                    sfq = fq(db, st_row["schema_name"], st_row["name"])
-                    try:
-                        self.q(self.scalar(f"SELECT GET_DDL('STREAM', {lit(sfq)})"))
-                        n_reset += 1
-                    except Exception as e:
-                        R.append(Result("stream", sfq, MANUAL, f"could not reset: {first_line(e)[:120]}"))
-            if n_reset:
-                R.append(Result("streams", f"{n_reset} stream(s)", OK,
-                                "reset after loading data, so tasks won't re-process restored rows"))
+        # 7b. streams: created now, after every table, view and row exists, so they start empty
+        #     (a fresh pipeline won't re-process the restored rows)
+        R += self._restore_streams(base)
 
         # 8. notebooks / Streamlit apps, then worksheets back into Workspaces
         R += self._restore_apps(base)
@@ -650,16 +660,19 @@ class SnowflakeConnector(SnowflakeExtrasMixin, Connector):
                 try:
                     self.q(stmt)
                 except Exception as e:
-                    grant_fail.append(f"{' '.join(stmt.split())[:90]} ({first_line(e)[:60]})")
+                    grant_fail.append(f"{' '.join(stmt.split())[:110]} ({first_line(e)[:200]})")
         me = self.scalar("SELECT CURRENT_USER()")
         for stmt in read("role_assignments.sql").splitlines():
             if stmt.strip():
                 try:
                     self.q(stmt.replace("{{ME}}", ident(me)))
                 except Exception as e:
-                    grant_fail.append(f"{stmt[:90]} ({first_line(e)[:60]})")
+                    grant_fail.append(f"{stmt[:110]} ({first_line(e)[:200]})")
         if grant_fail:
-            R.append(Result("grants", f"{len(grant_fail)} grant(s)", MANUAL, "; ".join(grant_fail[:5])))
+            for g in grant_fail[:30]:
+                R.append(Result("grant", g.split(" (")[0][:120], MANUAL, "refused: " + g[len(g.split(" (")[0]):].strip(" ()")[:200]))
+            if len(grant_fail) > 30:
+                R.append(Result("grants", f"{len(grant_fail) - 30} more", MANUAL, "see report_restore.json for all"))
         elif read("grants.sql").strip():
             R.append(Result("grants", "all", OK, "grants re-applied"))
         return R
@@ -703,6 +716,56 @@ class SnowflakeConnector(SnowflakeExtrasMixin, Connector):
                 R.append(Result("workspace", w["name"], MANUAL,
                                 f"auto-upload failed ({first_line(e)[:90]}). In Snowsight > Projects > Workspaces "
                                 f"use '+ > Upload Folder' and pick {local_root}"))
+        return R
+
+    def _restore_streams(self, base: Path) -> list[Result]:
+        f = base / "streams.json"
+        if not f.exists():                     # backups made by older versions: reset what exists
+            return self._reset_streams_legacy(base)
+        todo = json.loads(f.read_text())
+        R, errors = [], {}
+        for _ in range(3):                     # a stream on a view may need another stream's object first
+            left = []
+            for st_ in todo:
+                try:
+                    self.q(self.apply_rewrites(st_["ddl"]))
+                except Exception as e:
+                    errors[st_["fq"]] = str(e)
+                    left.append(st_)
+            if len(left) == len(todo):
+                break
+            todo = left
+        done = len(json.loads(f.read_text())) - len(todo)
+        if done:
+            R.append(Result("streams", f"{done} stream(s)", OK, "created after the data load, starting empty"))
+        for st_ in todo:
+            err = errors.get(st_["fq"], "")
+            low = err.lower()
+            src = f"{st_['source_type'].lower() or 'object'} {st_['source']}".strip()
+            if "change tracking" in low or "change_tracking" in low:
+                why = f"its source {src} needs change tracking. Run: ALTER TABLE <each table under it> SET CHANGE_TRACKING = TRUE; then re-run restore."
+            elif "does not exist" in low or "not authorized" in low:
+                why = f"its source {src} doesn't exist in the new account (check that it was restored without errors above)."
+            else:
+                why = first_line(Exception(err))
+            R.append(Result("stream", st_["fq"], FAILED, why))
+        return R
+
+    def _reset_streams_legacy(self, base: Path) -> list[Result]:
+        R, n = [], 0
+        detail_file = base / "inventory_detail.json"
+        if not detail_file.exists():
+            return R
+        for db, d in json.loads(detail_file.read_text()).items():
+            for st_row in d.get("streams", []):
+                sfq = fq(db, st_row["schema_name"], st_row["name"])
+                try:
+                    self.q(self.scalar(f"SELECT GET_DDL('STREAM', {lit(sfq)})"))
+                    n += 1
+                except Exception as e:
+                    R.append(Result("stream", sfq, MANUAL, f"could not reset: {first_line(e)[:120]}"))
+        if n:
+            R.append(Result("streams", f"{n} stream(s)", OK, "reset after loading data"))
         return R
 
     # ----------------------------------------------------------------- validate

@@ -142,11 +142,13 @@ class FakeSnowflake:
             return [{"column_name": "ID", "data_type": '{"type":"FIXED"}'},
                     {"column_name": "RAW_ROW", "data_type": '{"type":"VARIANT","nullable":true}'}]
         if s.startswith("SELECT COUNT_IF(IS_VARCHAR"):
-            return [(0,)]
+            return [(None,)]                                         # what Snowflake returns for an empty table
         if s.startswith("SHOW STREAMS"):
             return [{"name": "ORDERS_STRM", "schema_name": "BRONZE"}]
         if s.startswith("SELECT GET_DDL('STREAM'"):
             return [("create or replace stream SUPPLY_CHAIN_DB.BRONZE.ORDERS_STRM on table SUPPLY_CHAIN_DB.BRONZE.ORDERS;",)]
+        if self.target and s.startswith("GRANT USAGE ON DATABASE"):
+            raise Exception("001003 (42000): SQL compilation error:\nsyntax error line 1 at position 6 unexpected 'USAGE'.")
         if s.startswith("SHOW GRANTS OF ROLE"):
             return [{"granted_to": "USER", "grantee_name": "AR73M"}, {"granted_to": "ROLE", "grantee_name": "ACCOUNTADMIN"}]
         if s.startswith("SHOW WORKSPACES"):
@@ -233,9 +235,12 @@ def test_snowflake_backup_and_restore(tmp_path, monkeypatch):
     assert "versions/live/gold/" in log
     assert 'SET "RAW_ROW" = PARSE_JSON("RAW_ROW"::STRING)' in log          # JSON column turned back into JSON
     load_at = log.index("COPY INTO \"SUPPLY_CHAIN_DB\"")
-    assert log.index("create or replace stream", load_at) > load_at       # streams reset AFTER data load
+    assert log.lower().index("create or replace stream") > load_at        # streams created only AFTER data load
+    assert (pkg / "snowflake/streams.json").exists()
+    g = [r for r in res if r.kind == "grant"]
+    assert g and "unexpected 'USAGE'" in g[0].message, g                    # the real reason is shown
     assert 'GRANT ROLE "SYSADMIN" TO ROLE "ACCOUNTADMIN"' not in log      # built-in role links skipped
-    assert not [r for r in res if r.kind == "grants" and r.status != "OK"]
+    assert not [r for r in res if r.status == "FAILED"], [r for r in res if r.status == "FAILED"]
     assert 'GRANT ROLE "ANALYST" TO USER "NEWME"' in log            # old login mapped to new login
     assert "CREATE OR REPLACE NOTEBOOK" in log and "MASK_EMAIL" in log
     assert (pkg / "snowflake/apps/notebook").exists()
