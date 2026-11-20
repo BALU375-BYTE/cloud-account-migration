@@ -11,6 +11,7 @@ PLUGINS = {
     "snowflake": "connectors.snowflake_connector:SnowflakeConnector",
     "azure": "connectors.azure_connector:AzureConnector",
     "databricks": "connectors.databricks_connector:DatabricksConnector",
+    "neo4j": "connectors.neo4j_connector:Neo4jConnector",
 }
 
 

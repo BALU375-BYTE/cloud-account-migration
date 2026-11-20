@@ -14,3 +14,7 @@ azure-mgmt-resource>=23.1,<25   # 25+ was split into separate packages
 
 # Databricks (only needed if you migrate Databricks)
 databricks-sdk>=0.20
+
+# Neo4j (only needed if you migrate Neo4j)
+neo4j>=5.20,<6
+playwright>=1.45      # opens Aura in a browser window to collect your saved queries (uses Edge/Chrome already installed)

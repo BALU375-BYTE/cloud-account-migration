@@ -5,6 +5,8 @@ Start it with Start.bat (Windows) or:  python -m streamlit run app.py
 import os
 import platform as _os
 import subprocess
+import sys
+import time
 from dataclasses import asdict
 from pathlib import Path
 
@@ -127,6 +129,40 @@ def open_folder(path: Path) -> bool:
     except Exception as e:
         st.warning(f"Couldn't open the folder automatically ({e}). Copy the path below into File Explorer.")
         return False
+
+
+def collect_aura_queries(log):
+    """Open Aura in a browser window (user signs in), read Saved Cypher / tabs. Runs separately from the app."""
+    out = Path(OUT) / "_neo4j_queries" / time.strftime("%Y%m%d_%H%M%S")
+    proc = subprocess.Popen([sys.executable, "-m", "connectors.neo4j_queries", "capture", str(out)],
+                            cwd=str(Path(__file__).resolve().parent), stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace")
+    errors = []
+    for line in proc.stdout:
+        line = line.strip()
+        if not line or line.startswith("DONE"):
+            continue
+        if line.startswith("ERROR:"):
+            errors.append(line[6:].strip())
+        elif not line.startswith(("Traceback", "  File", "    ")):
+            log(line)
+    proc.wait()
+    if errors:
+        raise RuntimeError(errors[0])
+    return out if (out / "queries.json").exists() else None
+
+
+def show_queries(queries, key):
+    """Every saved query with its own copy button, grouped like the Aura Query tool."""
+    from connectors import neo4j_queries as nq
+    for kind, title in nq.KIND_TITLES.items():
+        items = [q for q in queries if q["kind"] == kind]
+        if not items:
+            continue
+        with st.expander(f"{title} ({len(items)})", expanded=kind == "saved"):
+            for i, q in enumerate(items, 1):
+                st.markdown(f"**{i}. {q.get('name') or '(no name)'}**" + (f"  ·  folder: {q['folder']}" if q.get("folder") else ""))
+                st.code(q["cypher"], language="cypher")
 
 
 @st.dialog("How to get these details", width="large")
@@ -270,7 +306,45 @@ elif page == "2. Back up":
     else:
         st.caption("Tip: scan first to choose what to include. Or just press Back up to take everything.")
 
+    collect = False
+    if platform == "neo4j":
+        from connectors import neo4j_queries as nq
+        st.subheader("Your saved queries")
+        is_aura = "neo4j.io" in (values["SRC"].get("URI") or "")
+        collect = st.checkbox("Also collect my saved queries from Aura (Saved Cypher, open query tabs and history)",
+                              value=is_aura, help="Neo4j keeps these with your Aura login, not in the database. "
+                              "A browser window opens: sign in to the OLD Aura account and the app reads them for you. "
+                              "Only the queries are kept - no passwords or cookies.")
+        if collect:
+            st.caption("When you press Back up, a browser window opens. Sign in to Aura with the **old** account; "
+                       "the app opens the Query tool, reads your queries and closes the window by itself.")
+        with st.expander("Already have a file of queries? (optional)"):
+            up = st.file_uploader("Saved Cypher export, .cypher, .txt, .json, .csv or .zip", key="neo_q_upload")
+            if up is not None:
+                tmp = Path(OUT) / "_neo4j_queries" / ("upload_" + time.strftime("%Y%m%d_%H%M%S"))
+                tmp.mkdir(parents=True, exist_ok=True)
+                f = tmp / Path(up.name).name
+                f.write_bytes(up.getvalue())
+                qs = nq.read_file(f)
+                if qs:
+                    nq.save(qs, tmp)
+                    st.session_state["neo_q_dir"] = str(tmp)
+                    st.success(f"Read {nq.counts_text(nq.load(tmp))} from {up.name}. They'll be added to the backup.")
+                else:
+                    st.warning("No Cypher queries found in that file.")
+        st.divider()
+
     if st.button("Back up now", type="primary"):
+        if collect:
+            qdir = run_with_log("Collecting your saved queries from Aura", collect_aura_queries)
+            if qdir:
+                st.session_state["neo_q_dir"] = str(qdir)
+                st.success(f"Collected {nq.counts_text(nq.load(qdir))}.")
+            else:
+                st.warning("No saved queries were collected (the window was closed before any were found). "
+                           "The database backup continues; you can back up again to retry.")
+        if platform == "neo4j":
+            extra["SRC_NEO_QUERIES_DIR"] = st.session_state.get("neo_q_dir", "")
         apply_env(platform, extra)
         out = run_with_log("Backing up", lambda log: engine.backup(platform, OUT, log=log))
         if out:
@@ -304,6 +378,15 @@ elif page == "3. Restore":
                 summary(counts)
                 todo_list(results)
                 results_table(results)
+        if platform == "neo4j":
+            from connectors import neo4j_queries as nq
+            qs = nq.load(pkg / "neo4j_queries")
+            if qs:
+                st.subheader(f"Your saved queries ({nq.counts_text(qs)})")
+                st.caption("Copied from the old Aura Query tool. Click the copy icon on any query, paste it into "
+                           "the new Aura Query tool and save it with the bookmark icon.")
+                st.link_button("Open the Aura Query tool", nq.AURA_QUERY, icon=":material/open_in_new:")
+                show_queries(qs, "restore")
 
 
 # ----------------------------------------------------------------------------- 4. check

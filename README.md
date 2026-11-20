@@ -3,7 +3,7 @@
 Copies everything from an **expiring cloud account** (for example a free trial) into a **new account**.
 It backs the old account up to your own computer, rebuilds it in the new account, then checks that both match.
 
-Works today for **Snowflake**, **Azure** (Storage + Data Factory) and **Databricks**. New platforms are added as plugins (see the end of this page).
+Works today for **Snowflake**, **Azure** (Storage + Data Factory), **Databricks** and **Neo4j** (graph database). New platforms are added as plugins (see the end of this page).
 
 ---
 
@@ -17,6 +17,15 @@ Works today for **Snowflake**, **Azure** (Storage + Data Factory) and **Databric
    The app opens in your browser. Keep the black window open while you use it; close it to stop.
 
 Mac / Linux: run `bash start.sh` instead.
+
+## First time with a platform?
+
+On the **Accounts** page, click **How do I get these details?**. A pop-up shows, step by step:
+- where to find every value
+- what you must create first (for Azure: an **app registration**, its **client secret**, and the **role** it needs)
+- fixes for the most common errors
+
+The same guides are in the `guides` folder.
 
 ## Using the app
 
@@ -49,6 +58,7 @@ You can back up today and restore days later, even after the old account has clo
 | **Snowflake** | Databases, schemas, tables **with data**, views, materialized/dynamic/external tables, file formats, sequences, procedures, functions, streams, tasks, pipes, stages and every file in internal stages, warehouses, resource monitors, account settings, roles and grants, users and role assignments, policies, tags, alerts, storage integrations, notebooks and Streamlit apps, **all Workspaces worksheets**, and your **query history** (last 365 days) | Approve the Azure consent link for storage integrations, resume tasks/alerts, set passwords for other users, re-create secrets, network policies and shares |
 | **Azure** | Storage containers and files (folder paths kept), Data Factory linked services, datasets, data flows, pipelines, triggers | Re-enter linked-service passwords/keys (Azure never exports them), start triggers |
 | **Databricks** | Notebooks and files (your `/Users/<email>` paths are fixed automatically), jobs (created paused), pipelines, cluster settings (saved only) | Table data, secrets, re-cloning Git folders, creating clusters |
+| **Neo4j** | Every database (except `system`): all nodes with labels and properties, all relationships with types and properties, constraints and indexes, and every property type (dates, times, durations, points, bytes, lists). Check compares counts and a fingerprint of the whole graph. **Saved Cypher, open query tabs and query history** from the Aura Query tool (you sign in once in a browser window). Works with AuraDB, Desktop and your own server | Users and custom roles (exact commands given), plugins such as APOC and GDS, pasting your saved queries into the new Aura (each has a copy button) |
 
 **Nothing can copy these** (the platform creates them itself): query, login and billing history inside the account, Time Travel versions, pending changes inside streams, load history, password and secret values, original creation dates, trial credits, and Snowsight dashboards (their SQL is in the query-history backup).
 
